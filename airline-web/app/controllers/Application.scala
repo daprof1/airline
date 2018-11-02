@@ -12,6 +12,7 @@ import com.patson.data.LinkSource
 import com.patson.data.AirlineSource
 import play.api.data.Form
 import play.api.data.Forms.mapping
+import play.api.mvc.RequestHeader
 import play.api.data.Forms.number
 import com.patson.data.CitySource
 import com.patson.data.LinkStatisticsSource
@@ -205,8 +206,13 @@ class Application extends Controller {
   
   
   
-  def index = Action {
-    Ok(views.html.index(""))
+  def index = Action { request =>
+	println(request.session.get("userId").getOrElse(-1))
+	request.session.get("userId").map { user =>
+		Ok(views.html.game(""))
+	}.getOrElse {
+		Ok(views.html.index())
+	}
   }
   def test = Action {
     Ok(views.html.test())
