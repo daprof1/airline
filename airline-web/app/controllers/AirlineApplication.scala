@@ -1,71 +1,25 @@
 package controllers
 
-import play.api.libs.json._
-import play.api.mvc._
-import play.api.libs.json.Json
-import com.patson.model.Airport
-import com.patson.model.Airline
-import com.patson.data.AirportSource
-import com.patson.Util
-import com.patson.model.Link
-import com.patson.data.LinkSource
-import com.patson.data.AirlineSource
-import com.patson.data.CycleSource
-import com.patson.model.AirlineBase
-import com.patson.model.AirlineBase
-import controllers.AuthenticationObject.Authenticated
-import controllers.AuthenticationObject.AuthenticatedAirline
-import com.patson.data.IncomeSource
-import com.patson.model.Period
-import com.patson.model.AirlineIncome
-import com.patson.model.LinksIncome
-import com.patson.model.TransactionsIncome
-import com.patson.model.OthersIncome
-import com.patson.AirlineSimulation
-import play.api.mvc.Security.AuthenticatedRequest
-import com.patson.data.CountrySource
-import com.patson.model.Country
-import com.patson.model.CountryMarketShare
-import com.patson.model.Computation
-import com.patson.data.BankSource
-import models.EntrepreneurProfile
-import com.patson.data.AirplaneSource
-import com.patson.model.Bank
 import java.awt.Color
-import com.patson.util.LogoGenerator
 import java.nio.file.Files
-import scala.util.Try
-import scala.util.Success
-import scala.util.Failure
-import com.patson.model.FlightCategory
-import com.patson.data.AllianceSource
-import com.patson.model.AllianceMember
-import com.patson.model.AirlineCashFlowItem
-import com.patson.model.CashFlowType
-import com.patson.data.CashFlowSource
-import com.patson.data.CashFlowSource
-import com.patson.model.AllianceRole
-import models.AirportFacility
-import models.FacilityType
-import com.patson.model.LoungeStatus
-import com.patson.model.Lounge
-import models.Consideration
-import com.patson.data.LinkStatisticsSource
-import com.patson.model.LinkStatistics
-import com.patson.data.LoungeHistorySource
-import scala.collection.mutable.ListBuffer
-import com.patson.model.LoungeConsumptionDetails
-import models.FacilityType.FacilityType
-import com.patson.data.UserSource
-import com.patson.model.User
-import com.patson.model.Alliance
-import com.patson.util.ChampionUtil
-import com.patson.util.ChampionInfo
-import com.patson.data.OilSource
+import java.util.Calendar
+
+import com.patson.AirlineSimulation
+import com.patson.data._
 import com.patson.model.Computation.ResetAmountInfo
+import com.patson.model.{Title, _}
+import com.patson.util.{AirportCache, ChampionUtil, LogoGenerator}
+import controllers.AuthenticationObject.{Authenticated, AuthenticatedAirline}
+import javax.inject.Inject
+import models.{AirportFacility, Consideration, EntrepreneurProfile, FacilityType}
+import play.api.libs.json.{Json, _}
+import play.api.mvc._
+import websocket.chat.ChatControllerActor
+
+import scala.util.{Failure, Success, Try}
 
 
-class AirlineApplication extends Controller {
+class AirlineApplication @Inject()(cc: ControllerComponents) extends AbstractController(cc) {
   object OwnedAirlineWrites extends Writes[Airline] {
     def writes(airline: Airline): JsValue =  {
       var values = List(
@@ -73,8 +27,8 @@ class AirlineApplication extends Controller {
       "name" -> JsString(airline.name),
       "balance" -> JsNumber(airline.airlineInfo.balance),
       "reputation" -> JsNumber(BigDecimal(airline.airlineInfo.reputation).setScale(2, BigDecimal.RoundingMode.HALF_EVEN)),
-      "serviceQuality" -> JsNumber(airline.airlineInfo.serviceQuality),
-      "serviceFunding" -> JsNumber(airline.airlineInfo.serviceFunding),
+      "serviceQuality" -> JsNumber(airline.airlineInfo.currentServiceQuality),
+      "targetServiceQuality" -> JsNumber(airline.airlineInfo.targetServiceQuality),
       "maintenanceQuality" -> JsNumber(airline.airlineInfo.maintenanceQuality),
       "gradeDescription" -> JsString(airline.airlineGrade.description),
       "gradeValue" -> JsNumber(airline.airlineGrade.value),
@@ -83,18 +37,31 @@ class AirlineApplication extends Controller {
       airline.getCountryCode.foreach { countryCode =>
         values = values :+ ("countryCode" -> JsString(countryCode))
       }
-      
+
       JsObject(values)
     }
   }
+
+  object LoginStatus extends Enumeration {
+    type LoginStatus = Value
+    val ONLINE, ACTIVE_7_DAYS, ACTIVE_30_DAYS, INACTIVE = Value
+  }
   
-  
-  implicit object AirlineWithUserWrites extends Writes[(Airline, User, Option[Alliance])] {
-    def writes(entry: (Airline, User, Option[Alliance])): JsValue = {
-      val (airline, user, alliance) = entry
-      var result = Json.toJson(airline).asInstanceOf[JsObject] + 
+  implicit object AirlineWithUserWrites extends Writes[(Airline, User, Option[LoginStatus.Value], Option[Alliance], Boolean)] {
+    def writes(entry: (Airline, User, Option[LoginStatus.Value], Option[Alliance], Boolean)): JsValue = {
+      val (airline, user, loginStatus, alliance, isCurrentUserAdmin) = entry
+      var result = Json.toJson(airline).asInstanceOf[JsObject] +
         ("userLevel" -> JsNumber(user.level)) +
         ("username" -> JsString(user.userName))
+
+      if (isCurrentUserAdmin) {
+        result = result + ("userStatus" -> JsString(user.status.toString)) + ("userId" -> JsNumber(user.id))
+
+      }
+
+      loginStatus.foreach { status => //if there's a login status
+        result = result + ("loginStatus" -> JsNumber(status.id))
+      }
         
       alliance.foreach { alliance =>
         result = result + ("allianceName" -> JsString(alliance.name))
@@ -115,24 +82,58 @@ class AirlineApplication extends Controller {
       "overall" -> JsNumber(info.overall)))
     }
   }
-  
-  def getAllAirlines() = Authenticated { implicit request =>
+
+  def getAllAirlines(loginStatus : Boolean, hideInactive : Boolean) = Authenticated { implicit request =>
      //val airlines = AirlineSource.loadAllAirlines(fullLoad = true)
-    val airlinesByUser = scala.collection.mutable.Map[Airline, User]() 
+    val airlinesByUser = scala.collection.mutable.Map[Airline, User]()
+    val sevenDaysAgo = Calendar.getInstance();
+    sevenDaysAgo.add(Calendar.DATE, -7)
+    val thirtyDaysAgo = Calendar.getInstance()
+    thirtyDaysAgo.add(Calendar.DATE, -30)
+
     UserSource.loadUsersByCriteria(List.empty).foreach { user =>
-      user.getAccessibleAirlines().foreach { airline =>
-        airlinesByUser.put(airline, user)  
+      if (!hideInactive || user.lastActiveTime.after(thirtyDaysAgo)) {
+        user.getAccessibleAirlines().foreach { airline =>
+          airlinesByUser.put(airline, user)
+        }
       }
     }
-    
+
+    val userStatusMap: Map[User, LoginStatus.Value] =
+      if (loginStatus) {
+
+        val activeUsers = ChatControllerActor.getActiveUsers().map(_.id)
+        airlinesByUser.values.map { user =>
+          val status =
+            if (activeUsers.contains(user.id)) {
+              LoginStatus.ONLINE
+            } else {
+              if (user.lastActiveTime.after(sevenDaysAgo)) {
+                LoginStatus.ACTIVE_7_DAYS
+              } else if (user.lastActiveTime.after(thirtyDaysAgo)) {
+                LoginStatus.ACTIVE_30_DAYS
+              } else {
+                LoginStatus.INACTIVE
+              }
+            }
+          (user, status)
+        }.toMap
+      } else {
+        Map.empty[User, LoginStatus.Value]
+      }
+
+
+
+
     val alliances = AllianceSource.loadAllAlliances().map(alliance => (alliance.id, alliance)).toMap
     Ok(Json.toJson(airlinesByUser.toList.map {
-      case(airline, user) => (airline, user, airline.getAllianceId.map(alliances(_)))
+      case(airline, user) => (airline, user, userStatusMap.get(user), airline.getAllianceId.map(alliances(_)), request.user.isAdmin)
     })).withHeaders(
       ACCESS_CONTROL_ALLOW_ORIGIN -> "http://localhost:9000",
       "Access-Control-Allow-Credentials" -> "true"
     )
   }
+
   
   def getAirline(airlineId : Int, extendedInfo : Boolean) = AuthenticatedAirline(airlineId) { request =>
      val airline = request.user
@@ -165,7 +166,7 @@ class AirlineApplication extends Controller {
        val destinations = if (airportsServed > 0) airportsServed - 1 else 0 //minus home base
        
        val currentCycle = CycleSource.loadCycle()
-       val airplanes = AirplaneSource.loadAirplanesByOwner(airlineId).filter(_.isReady(currentCycle))
+       val airplanes = AirplaneSource.loadAirplanesByOwner(airlineId).filter(_.isReady)
        
        val fleetSize = airplanes.length
        val fleetAge = if (fleetSize > 0) airplanes.map(currentCycle - _.constructedCycle).sum / fleetSize else 0
@@ -181,7 +182,7 @@ class AirlineApplication extends Controller {
   }
   def getBase(airlineId : Int, airportId : Int) = AuthenticatedAirline(airlineId) { request =>
     var result = Json.obj().asInstanceOf[JsObject]
-    AirportSource.loadAirportById(airportId) match {
+    AirportCache.getAirport(airportId) match {
       case Some(airport) => {
         val existingBase = AirlineSource.loadAirlineBaseByAirlineAndAirport(airlineId, airportId)
         if (existingBase.isDefined) {
@@ -303,8 +304,8 @@ class AirlineApplication extends Controller {
     val linkStatisticsFromThisAirport : Map[Airline, List[LinkStatistics]] = LinkStatisticsSource.loadLinkStatisticsByFromAirport(airport.id).groupBy(_.key.airline)
     val linkStatisticsToThisAirport : Map[Airline, List[LinkStatistics]] = LinkStatisticsSource.loadLinkStatisticsByToAirport(airport.id).groupBy(_.key.airline)
     val passengersOnThisAirport : Map[Airline, Long] = (linkStatisticsFromThisAirport.toList ++ linkStatisticsToThisAirport.toList).groupBy(_._1) //this gives Map[Airline, List[(Airline, List[LinkStatistics])]]
-                                      .mapValues(_.map(_._2).flatten) //this gives Map[Airline, List[LinkStatistics]]
-                                      .mapValues(_.map(_.passengers).sum)
+                                      .view.mapValues(_.map(_._2).flatten) //this gives Map[Airline, List[LinkStatistics]]
+                                      .mapValues(_.map(_.passengers.toLong).sum).toMap
                                       
     val sortedPassengersOnThisAirport : List[(Airline, Long)] = passengersOnThisAirport.toList.sortBy(_._2)
     val eligibleAirlines : List[(Airline, Long)] = sortedPassengersOnThisAirport.takeRight(newLounge.getActiveRankingThreshold)
@@ -329,7 +330,7 @@ class AirlineApplication extends Controller {
      if (base.scale == 1) { //cannot downgrade any further
        return Some("Cannot downgrade this base any further")
      }
-     val airport = AirportSource.loadAirportById(base.airport.id, true).get
+     val airport = AirportCache.getAirport(base.airport.id, true).get
      val assignedSlots = airport.getAirlineSlotAssignment(base.airline.id)
      val preferredSlots = airport.getPreferredSlotAssignment(base.airline, scaleAdjustment = 0)
      val preferredSlotsAfterDowngrade = airport.getPreferredSlotAssignment(base.airline, scaleAdjustment = -1)
@@ -357,6 +358,14 @@ class AirlineApplication extends Controller {
         linksFromThisAirport.foreach { link =>
           LinkSource.deleteLink(link.id)
         }
+
+        //assign all airplanes on this base to HQ
+        val headquarters = request.user.getHeadQuarter().get
+        val updatingAirplanes = AirplaneSource.loadAirplanesCriteria(List(("home", airportId), ("owner", airlineId))).map { airplane =>
+          airplane.home = headquarters.airport
+          airplane
+        }
+        AirplaneSource.updateAirplanes(updatingAirplanes)
         
         AirlineSource.loadLoungeByAirlineAndAirport(airlineId, airportId).foreach { lounge =>
           AirlineSource.deleteLounge(lounge)
@@ -396,25 +405,33 @@ class AirlineApplication extends Controller {
                  Created(Json.toJson(updateBase))
                }
                case None => //ok to add then
-                 AirportSource.loadAirportById(inputBase.airport.id, true).fold {
+                 AirportCache.getAirport(inputBase.airport.id, true).fold {
                    BadRequest("airport id " +  inputBase.airport.id + " not found!")
-                 } { airport =>//TODO for now. Maybe update to Ad event later on
+                 } {
+                   airport => //TODO for now. Maybe update to Ad event later on
                    val newBase = inputBase.copy(foundedCycle = CycleSource.loadCycle(), countryCode = airport.countryCode)
                    AirlineSource.saveAirlineBase(newBase)
-                   if (airport.getAirlineAwareness(airlineId) < 20) { //update to 10 for hq
-                     airport.setAirlineAwareness(airlineId, 20)
-                     AirportSource.updateAirlineAppeal(List(airport))
+                   val existingAppeal = airport.getAirlineBaseAppeal(airlineId)
+                   if (existingAppeal.awareness < 20) { //update to 10 for hq
+                     AirportSource.updateAirlineAppeal(airport.id, airlineId, AirlineAppeal(existingAppeal.loyalty, 20))
                    }
                    
                    airline.setCountryCode(newBase.countryCode)
                    AirlineSource.saveAirlineInfo(airline, updateBalance = false)
                    AirlineSource.adjustAirlineBalance(request.user.id, -1 * cost)
                    AirlineSource.saveCashFlowItem(AirlineCashFlowItem(airlineId, CashFlowType.BASE_CONSTRUCTION, -1 * cost))
+
+                     //assign airlinese that are not yet assigned
+                   AirplaneSource.updateAirplanesDetails(AirplaneSource.loadAirplanesByOwner(airlineId).map {
+                     airplane => airplane.home = airport
+                     airplane
+                   })
+
                    Created(Json.toJson(newBase))
                  }
               }
           } else {
-            AirportSource.loadAirportById(inputBase.airport.id, true).fold {
+            AirportCache.getAirport(inputBase.airport.id, true).fold {
               BadRequest("airport id " +  inputBase.airport.id + " not found!")
             } { airport =>
                   AirlineSource.loadAirlineBaseByAirlineAndAirport(airlineId, airportId) match { 
@@ -425,7 +442,7 @@ class AirlineApplication extends Controller {
                     AirlineSource.saveCashFlowItem(AirlineCashFlowItem(airlineId, CashFlowType.BASE_CONSTRUCTION, -1 * cost))
                     Created(Json.toJson(updateBase))
                   case None => //ok to add
-                    AirportSource.loadAirportById(inputBase.airport.id, true).fold {
+                    AirportCache.getAirport(inputBase.airport.id, true).fold {
                          BadRequest("airport id " +  inputBase.airport.id + " not found!")
                     } { airport =>
                       val newBase = inputBase.copy(foundedCycle = CycleSource.loadCycle(), countryCode = airport.countryCode)
@@ -462,7 +479,7 @@ class AirlineApplication extends Controller {
   
   def getFacilities(airlineId : Int, airportId : Int) = AuthenticatedAirline(airlineId) { request =>
     val airline : Airline = request.user
-    AirportSource.loadAirportById(airportId) match {
+    AirportCache.getAirport(airportId) match {
       case Some(airport) =>
         AirlineSource.loadLoungeByAirlineAndAirport(airlineId, airportId) match {
           case Some(lounge) =>
@@ -491,7 +508,7 @@ class AirlineApplication extends Controller {
   def getFacilityConsideration(airlineId : Int, airportId : Int) = AuthenticatedAirline(airlineId) { request =>
     val airline : Airline = request.user
     val inputFacility = request.body.asInstanceOf[AnyContentAsJson].json.as[AirportFacility]
-    AirportSource.loadAirportById(airportId) match {
+    AirportCache.getAirport(airportId) match {
       case Some(airport) =>
         inputFacility.facilityType match {
           case FacilityType.LOUNGE =>
@@ -564,6 +581,19 @@ class AirlineApplication extends Controller {
       BadRequest("Cannot build facitilty")
     }
   }
+
+  def getLinkLimits(airlineId : Int) = AuthenticatedAirline(airlineId) { request =>
+    val airline = request.user
+    val titlesByCountryCode: Map[String, Title.Value] = CountrySource.loadCountryAirlineTitlesByCriteria(List(("airline", airlineId))).map(entry => (entry.country.countryCode, entry.title)).toMap
+    var result = Json.obj()
+    airline.getBases().foreach { base =>
+      val linkCount = LinkSource.loadLinksByCriteria(List(("from_airport", base.airport.id), ("airline", airlineId)), LinkSource.ID_LOAD).length
+      val linkLimit = base.getLinkLimit(titlesByCountryCode.get(base.countryCode))
+      val overtimeCompensation = base.getOvertimeCompensation(linkLimit, linkCount)
+      result = result + (base.airport.id.toString() -> Json.obj("linkLimit" -> linkLimit, "linkCount" -> linkCount, "overtimeCompensation" -> overtimeCompensation))
+    }
+    Ok(result)
+  }
   
   
   def getAirlineFinances(airlineId : Int) = AuthenticatedAirline(airlineId) { request =>
@@ -573,30 +603,13 @@ class AirlineApplication extends Controller {
      Ok(Json.obj("incomes" -> Json.toJson(incomes), "cashFlows" -> Json.toJson(cashFlows)))
   }
   
-  def getServicePrediction(airlineId : Int) = AuthenticatedAirline(airlineId) { request =>
-     val airline = request.user
-     val targetQuality = AirlineSimulation.getTargetQuality(airline.getServiceFunding(), LinkSource.loadLinksByAirlineId(airlineId, LinkSource.FULL_LOAD))
-     
-     val delta = targetQuality - airline.getServiceQuality()
-     val prediction =  
-       if (delta >= 20) {
-         "Increase rapidly"
-       } else if (delta >= 10) {
-         "Increase steadily"
-       } else if (delta >= 5) {
-         "Increase slightly"
-       } else if (delta >= -5) {
-         "Steady"
-       } else if (delta >= -10) {
-         "Decrease slightly"
-       } else if (delta >= -20) {
-         "Decrease steadily"
-       } else {
-         "Decrease rapidly"
-       }
+  def getServiceFundingProjection(airlineId : Int) = AuthenticatedAirline(airlineId) { request =>
+     val targetQuality = request.user.getTargetServiceQuality()
+
+     val funding = AirlineSimulation.getServiceFunding(targetQuality, LinkSource.loadLinksByAirlineId(airlineId))
      
      
-     Ok(JsObject(List("prediction" -> JsString(prediction))))
+     Ok(JsObject(List("fundingProjection" -> JsNumber(funding))))
   }
   
   def getChampionedCountries(airlineId : Int) = Authenticated { implicit request =>
@@ -605,7 +618,22 @@ class AirlineApplication extends Controller {
     
     Ok(Json.toJson(championedCountryByThisAirline))
   }
-  
+
+  def getCountryAirlineTitles(airlineId : Int) = Authenticated { implicit request =>
+    val titles  = CountrySource.loadCountryAirlineTitlesByCriteria(List(("airline", airlineId)))
+    var nationalAirlinesJson = Json.arr()
+    var partneredAirlinesJson = Json.arr()
+    titles.foreach { title =>
+      val valueJson = Json.obj("countryCode" -> title.country.countryCode, "bonus" -> title.loyaltyBonus)
+      title.title match {
+        case Title.NATIONAL_AIRLINE => nationalAirlinesJson = nationalAirlinesJson.append(valueJson)
+        case Title.PARTNERED_AIRLINE => partneredAirlinesJson = partneredAirlinesJson.append(valueJson)
+      }
+    }
+
+    Ok(Json.obj("nationalAirlines" -> nationalAirlinesJson, "partneredAirlines" -> partneredAirlinesJson))
+  }
+
   def resetAirline(airlineId : Int, keepAssets : Boolean) = AuthenticatedAirline(airlineId) { request =>
     if (airlineId != request.user.id) {
       Forbidden
@@ -614,44 +642,11 @@ class AirlineApplication extends Controller {
         case Some(rejection) => Ok(Json.obj("rejection" -> rejection))
         case None =>
           val resetBalance = if (keepAssets) Computation.getResetAmount(airlineId).overall else EntrepreneurProfile.INITIAL_BALANCE //do it here before deleting everything
-          
-          LinkSource.loadLinksByAirlineId(airlineId).foreach { link => //remove all links
-            LinkSource.deleteLink(link.id)
+          Airline.resetAirline(airlineId, newBalance = resetBalance) match {
+            case Some(airline) =>
+              Ok(Json.toJson(airline))
+            case None => NotFound
           }
-          //remove all airplanes
-          AirplaneSource.deleteAirplanesByCriteria(List(("owner", airlineId)));
-          //remove all bases
-          AirlineSource.deleteAirlineBaseByCriteria(List(("airline", airlineId)))
-          //remove all loans
-          BankSource.loadLoansByAirline(airlineId).foreach { loan =>
-            BankSource.deleteLoan(loan.id)
-          }
-          //remove all facilities
-          AirlineSource.deleteLoungeByCriteria(List(("airline", airlineId)))
-          
-          //remove all oil contract
-          OilSource.deleteOilContractByCriteria(List(("airline", airlineId)))
-          
-          AllianceSource.loadAllianceMemberByAirline(request.user).foreach { allianceMember =>
-            AllianceSource.deleteAllianceMember(airlineId)
-            if (allianceMember.role == AllianceRole.LEADER) { //remove the alliance
-               AllianceSource.deleteAlliance(allianceMember.allianceId)
-            }
-          }  
-          
-          //reset balance
-          val airline : Airline = request.user
-          
-          airline.setBalance(resetBalance) 
-          
-          //unset country code
-          airline.removeCountryCode()
-          //unset service investment
-          airline.setServiceFunding(0)
-          airline.setServiceQuality(0)
-          
-          AirlineSource.saveAirlineInfo(airline)
-          Ok(Json.toJson(airline))
       }
     }
   }
@@ -711,13 +706,13 @@ class AirlineApplication extends Controller {
       Ok(Json.obj("error" -> JsString("Cannot upload img at current reputation"))) //have to send ok as the jquery plugin's error cannot read the response
     } else {
       request.body.asMultipartFormData.map { data =>
-        import java.io.File
-        val logoFile = data.file("logoFile").get.ref.file
+
+        val logoFile = data.file("logoFile").get.ref.path
         LogoUtil.validateUpload(logoFile) match {
           case Some(rejection) =>
             Ok(Json.obj("error" -> JsString(rejection))) //have to send ok as the jquery plugin's error cannot read the response
           case None =>
-            val data =Files.readAllBytes(logoFile.toPath)
+            val data =Files.readAllBytes(logoFile)
             LogoUtil.saveLogo(airlineId, data)
             
             println("Uploaded logo for airline " + request.user)

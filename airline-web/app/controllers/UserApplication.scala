@@ -5,13 +5,13 @@ import play.api.data.Forms.mapping
 import play.api.data.Forms.number
 import play.api.mvc._
 import play.api.libs.json.Writes
-import com.patson.model.User
-import com.patson.model.Airline
+import com.patson.model.{Airline, User, UserStatus}
 import play.api.libs.json._
 import com.patson.data.UserSource
 import com.patson.data.AllianceSource
+import javax.inject.Inject
 
-class UserApplication extends Controller {
+class UserApplication @Inject()(cc: ControllerComponents) extends AbstractController(cc) {
   implicit object UserWrites extends Writes[User] {
     def writes(user: User): JsValue = {
       var result = JsObject(List(
@@ -39,6 +39,9 @@ class UserApplication extends Controller {
   // then in a controller
   def login = Authenticated { implicit request =>
     UserSource.updateUserLastActive(request.user)
+    if (request.user.status == UserStatus.INACTIVE) {
+      UserSource.updateUser(request.user.copy(status = UserStatus.ACTIVE))
+    }
     Ok(Json.toJson(request.user)).withHeaders("Access-Control-Allow-Credentials" -> "true").withSession("userId" -> String.valueOf(request.user.id))
   }
   

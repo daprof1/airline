@@ -13,6 +13,7 @@ import play.api.libs.json.JsValue
 import play.api.libs.json.Json
 import play.api.libs.json.Writes
 import play.api.mvc._
+
 import scala.collection.mutable.ListBuffer
 import com.patson.data.CycleSource
 import controllers.AuthenticationObject.AuthenticatedAirline
@@ -36,10 +37,11 @@ import com.patson.data.AllianceSource
 import com.patson.model.AllianceHistory
 import play.api.libs.json.JsBoolean
 import com.patson.data.LinkSource
-import com.patson.util.ChampionUtil
+import com.patson.util.{AirlineCache, AllianceRankingUtil, ChampionUtil}
+import javax.inject.Inject
 
 
-class AllianceApplication extends Controller {
+class AllianceApplication @Inject()(cc: ControllerComponents) extends AbstractController(cc) {
   implicit object AllianceWrites extends Writes[Alliance] {
     //case class AllianceMember(alliance: Alliance, airline : Airline, role : AllianceRole.Value, joinedCycle : Int)
     def writes(alliance: Alliance): JsValue = JsObject(List(
@@ -129,18 +131,24 @@ class AllianceApplication extends Controller {
     formAllianceForm.bindFromRequest.fold(
       // Form has errors, redisplay it
       erroredForm => Ok(Json.obj("rejection" -> JsString(erroredForm.error("allianceName").get.message))), { formAllianceInput =>
-        val allianceName = formAllianceInput.allianceName
-        val currentCycle = CycleSource.loadCycle()
-        val newAlliance = Alliance(name = allianceName, creationCycle = currentCycle, members = List())
-        AllianceSource.saveAlliance(newAlliance)
-        
-        val allianceMember = AllianceMember(allianceId = newAlliance.id, airline = request.user, role = LEADER, joinedCycle = currentCycle)
-        AllianceSource.saveAllianceMember(allianceMember)
-        
-        val history = AllianceHistory(allianceName = newAlliance.name, airline = request.user, event = FOUND_ALLIANCE, cycle = currentCycle)
-        AllianceSource.saveAllianceHistory(history)
-        
-        Ok(Json.toJson(newAlliance.copy(members = List(allianceMember))))
+        //make sure the current airline is not in any alliance
+        AllianceSource.loadAllianceMemberByAirline(request.user) match {
+          case None =>
+            val allianceName = formAllianceInput.allianceName
+            val currentCycle = CycleSource.loadCycle()
+            val newAlliance = Alliance(name = allianceName, creationCycle = currentCycle, members = List())
+            AllianceSource.saveAlliance(newAlliance)
+
+            val allianceMember = AllianceMember(allianceId = newAlliance.id, airline = request.user, role = LEADER, joinedCycle = currentCycle)
+            AllianceSource.saveAllianceMember(allianceMember)
+
+            val history = AllianceHistory(allianceName = newAlliance.name, airline = request.user, event = FOUND_ALLIANCE, cycle = currentCycle)
+            AllianceSource.saveAllianceHistory(history)
+
+            Ok(Json.toJson(newAlliance.copy(members = List(allianceMember))))
+          case Some(currentAirlineAllianceMember) =>
+            BadRequest(s"Current airline is an alliance member of $currentAirlineAllianceMember, cannot form new alliance")
+        }
       }
     )
   }
@@ -151,7 +159,7 @@ class AllianceApplication extends Controller {
     
     var result = Json.arr()
     
-    val alliancesWithRanking : Map[Alliance, (Int, BigDecimal)] = Alliance.getRankings(alliances)
+    val alliancesWithRanking : Map[Int, (Int, BigDecimal)] = AllianceRankingUtil.getRankings()
     
     alliances.foreach {
       alliance => 
@@ -164,7 +172,7 @@ class AllianceApplication extends Controller {
           }
         }
         allianceJson = allianceJson + ("members" -> allianceMemberJson)
-        alliancesWithRanking.get(alliance).foreach { 
+        alliancesWithRanking.get(alliance.id).foreach {
           case((ranking, championPoints)) => {
             allianceJson = allianceJson + ("ranking" -> JsNumber(ranking))
             allianceJson = allianceJson + ("championPoints" -> JsNumber(championPoints))
@@ -298,7 +306,7 @@ class AllianceApplication extends Controller {
              if (currentAirlineAllianceMember.role != LEADER) {
                BadRequest("Current airline " + request.user + " cannot remove airline id "+ targetAirlineId + " from alliance as current airline is not leader")
              } else {
-               AirlineSource.loadAirlineById(targetAirlineId) match {
+               AirlineCache.getAirline(targetAirlineId) match {
                  case None => NotFound("Airline with id " + targetAirlineId + " not found")
                  case Some(targetAirline) =>
                    AllianceSource.loadAllianceMemberByAirline(targetAirline) match {
@@ -333,7 +341,7 @@ class AllianceApplication extends Controller {
              BadRequest("Current airline " + request.user + " cannot remove airline id "+ targetAirlineId + " from alliance as current airline is not leader")
            } else {
              val alliance = AllianceSource.loadAllianceById(currentAirlineAllianceMember.allianceId, false).get 
-             AirlineSource.loadAirlineById(targetAirlineId) match {
+             AirlineCache.getAirline(targetAirlineId) match {
                case None => NotFound("Airline with id " + targetAirlineId + " not found")
                case Some(targetAirline) =>
                  AllianceSource.loadAllianceMemberByAirline(targetAirline) match {
@@ -365,7 +373,7 @@ class AllianceApplication extends Controller {
              BadRequest("Current airline " + request.user + " cannot promote airline id "+ targetAirlineId + " from alliance as current airline is not leader")
            } else {
              val alliance = AllianceSource.loadAllianceById(currentAirlineAllianceMember.allianceId, false).get 
-             AirlineSource.loadAirlineById(targetAirlineId) match {
+             AirlineCache.getAirline(targetAirlineId) match {
                case None => NotFound("Airline with id " + targetAirlineId + " not found")
                case Some(targetAirline) =>
                  AllianceSource.loadAllianceMemberByAirline(targetAirline) match {

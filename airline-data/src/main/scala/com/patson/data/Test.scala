@@ -3,14 +3,18 @@ package com.patson.data
 
 import scala.concurrent.Future
 import java.util.concurrent.TimeUnit
+
+import com.patson.EventSimulation
+import com.patson.model.event.Olympics
+
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.collection.mutable.ListBuffer
 import scala.concurrent.Await
 import scala.concurrent.duration.Duration
 import scala.util.Random
+import com.patson.model._
 
 object Test extends App {
-     
 //       println(WikiUtil.queryProfilePicture("Charles de Gaulle Airport", List.empty))
 //       println(WikiUtil.queryOtherPicture("Charles de Gaulle Airport", AirportProfilePicturePatcher.airportPreferredWords))
        
@@ -24,16 +28,17 @@ object Test extends App {
 //     println(WikiUtil.queryOtherPicture("Vancouver"))
      
 //        println(AirportProfilePicturePatcher.getCityProfilePictureUrl(Airport.fromId(0).copy(city="Barrow", countryCode="US")))
-//       AirportFeaturePatcher.patchFeatures()
+
 // AirportProfilePicturePatcher.patchProfilePictures()
 //    AirlineSource.loadAllAirlines(false).foreach(println)
 //    Patchers.patchAirlineCode()
 //    Patchers.patchFlightNumber()
-    Patchers.airplaneModelPatcher()
+//    Patchers.airplaneModelPatcher()
 //  Patchers.patchAirlineLogos()
 //  IsolatedAirportPatcher.patchIsolatedAirports()
-  
-  
+//  val olympics = EventSource.loadEvents().last.asInstanceOf[Olympics]
+//  val voteRounds = EventSimulation.simulateOlympicsVoteRounds(olympics)
+//  EventSource.saveOlympicsVoteRounds(olympics.id, voteRounds)
 }
 
 

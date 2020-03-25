@@ -1,17 +1,24 @@
 var loadedRivals = []
 var loadedRivalsById = {}
 var loadedRivalLinks = []
+var hideInactive = true
 
 function showRivalsCanvas(selectedAirline) {
 	setActiveDiv($("#rivalsCanvas"))
-	highlightTab($('#rivalsCanvasTab'))
+	highlightTab($('.rivalsCanvasTab'))
 	$('#rivalDetails').hide()
 	loadAllRivals(selectedAirline)
 }
 
+function toggleHideInactive(flagValue) {
+    hideInactive = flagValue
+    var selectedSortHeader = $('#rivalsTableSortHeader .table-header .cell.selected')
+    updateRivalsTable(selectedSortHeader.data('sort-property'), selectedSortHeader.data('sort-order'), null)
+}
+
 function loadAllRivals(selectedAirline) {
-	var getUrl = "airlines"
-	
+	var getUrl = "airlines?loginStatus=true"
+
 	loadedRivals = []
 	loadedRivalsById = {}
 	$.ajax({
@@ -42,22 +49,33 @@ function updateRivalsTable(sortProperty, sortOrder, selectedAirline) {
 	var rivalsTable = $("#rivalsCanvas #rivalsTable")
 	
 	rivalsTable.children("div.table-row").remove()
-	
+
+	//filter if necessary
+	var displayRivals
+	if (hideInactive) {
+	    displayRivals = loadedRivals.filter(function(rival) {
+                                    	    		  return rival.loginStatus < 3
+                                    	    	});
+	} else {
+	    displayRivals = loadedRivals
+    }
+
 	//sort the list
-	loadedRivals.sort(sortByProperty(sortProperty, sortOrder == "ascending"))
+	displayRivals.sort(sortByProperty(sortProperty, sortOrder == "ascending"))
 	
 	var selectedRow
-	$.each(loadedRivals, function(index, airline) {
+	$.each(displayRivals, function(index, airline) {
 		var row = $("<div class='table-row clickable' data-airline-id='" + airline.id + "' onclick=\"loadRivalDetails($(this), '" + airline.id + "')\"></div>")
 //		var countryFlagImg = ""
 //		if (airline.countryCode) {
 //			countryFlagImg = getCountryFlagImg(airline.countryCode)
 //		}
-		
+
+		row.append("<div class='cell'><img src='" + getStatusLogo(airline.loginStatus) + "' title='" + getStatusTitle(airline.loginStatus) + "' style='vertical-align:middle;'/>")
 		row.append("<div class='cell'>" + getAirlineLogoImg(airline.id) + airline.name + getUserLevelImg(airline.userLevel) 
 				+ (airline.isGenerated ? "<img src='assets/images/icons/robot.png' title='AI' style='vertical-align:middle;'/>" : "") + "</div>")
 		if (airline.headquartersAirportName) {
-			row.append("<div class='cell'>" + getAirportText(airline.headquartersCity, airline.headquartersAirportName) + "</div>")
+			row.append("<div class='cell'>" + getAirportText(airline.headquartersCity, airline.headquartersAirportIata) + "</div>")
 		} else {
 			row.append("<div class='cell'>-</div>")
 		}
@@ -73,9 +91,35 @@ function updateRivalsTable(sortProperty, sortOrder, selectedAirline) {
 	});
 	
 	if (selectedRow) {
+	    selectedRow[0].scrollIntoView()
 		loadRivalDetails(selectedRow, selectedAirline)
 	}
 }
+
+function getStatusLogo(status) {
+    if (status == 0) {
+      return "assets/images/icons/12px/status-green.png"
+    } else if (status == 1) {
+      return "assets/images/icons/12px/status-yellow.png"
+    } else if (status == 2) {
+      return "assets/images/icons/12px/status-orange.png"
+    } else {
+      return "assets/images/icons/12px/status-grey.png"
+    }
+}
+
+function getStatusTitle(status) {
+    if (status == 0) {
+      return "Online"
+    } else if (status == 1) {
+      return "Active within last 7 days"
+    } else if (status == 2) {
+      return "Active within last 30 days"
+    } else {
+      return "Inactive"
+    }
+}
+
 
 function toggleRivalsTableSortOrder(sortHeader) {
 	if (sortHeader.data("sort-order") == "ascending") {
@@ -98,10 +142,13 @@ function loadRivalDetails(row, airlineId) {
 	
 	updateRivalBasicsDetails(airlineId)
 	updateRivalChampionedCountriesDetails(airlineId)
+	updateRivalCountriesAirlineTitles(airlineId)
 	loadRivalLinks(airlineId)
 	
 	updateRivalBaseList(airlineId)
-	
+
+	showAdminActions(loadedRivalsById[airlineId])
+
 	$('#rivalDetails').fadeIn(200)
 }
 
@@ -192,7 +239,7 @@ function updateRivalChampionedCountriesDetails(airlineId) {
 	    success: function(championedCountries) {
 	    	$(championedCountries).each(function(index, championDetails) {
 	    		var country = championDetails.country
-	    		var row = $("<div class='table-row clickable' onclick=\"loadCountryDetails('" + country.countryCode + "'); showCountryView();\"></div>")
+	    		var row = $("<div class='table-row clickable' onclick=\" showCountryView('" + country.countryCode + "');\"></div>")
 	    		row.append("<div class='cell'>" + getRankingImg(championDetails.ranking) + "</div>")
 	    		row.append("<div class='cell'>" + getCountryFlagImg(country.countryCode) + country.name + "</div>")
 	    		row.append("<div class='cell'>" + championDetails.reputationBoost + "</div>") 
@@ -205,6 +252,47 @@ function updateRivalChampionedCountriesDetails(airlineId) {
 	    		row.append("<div class='cell'>-</div>")
 	    		row.append("<div class='cell'>-</div>")
 	    		$('#rivalChampionedCountriesList').append(row)
+	    	}
+	    },
+        error: function(jqXHR, textStatus, errorThrown) {
+	            console.log(JSON.stringify(jqXHR));
+	            console.log("AJAX error: " + textStatus + ' : ' + errorThrown);
+	    }
+	});
+}
+
+function updateRivalCountriesAirlineTitles(airlineId) {
+	$('#rivalsCanvas .nationalAirlineCountryList').children('div.table-row').remove()
+	$('#rivalsCanvas .partneredAirlineCountryList').children('div.table-row').remove()
+
+	$.ajax({
+		type: 'GET',
+		url: "airlines/" + airlineId + "/country-airline-titles",
+	    contentType: 'application/json; charset=utf-8',
+	    dataType: 'json',
+	    success: function(titles) {
+	    	$(titles.nationalAirlines).each(function(index, entry) {
+	    	    var country = loadedCountriesByCode[entry.countryCode]
+	    		var row = $("<div class='table-row clickable' onclick=\" showCountryView('" + country.countryCode + "');\"></div>")
+	    		row.append("<div class='cell'>" + getCountryFlagImg(entry.countryCode) + country.name + "</div>")
+	    		row.append("<div class='cell'>" + entry.bonus + "</div>")
+	    		$('#rivalsCanvas .nationalAirlineCountryList').append(row)
+	    	})
+
+	    	if (titles.nationalAirlines.length == 0) {
+	    		$('#rivalsCanvas .nationalAirlineCountryList').append($("<div class='table-row'><div class='cell'>-</div><div class='cell'>-</div></div>"))
+	    	}
+
+	    	$(titles.partneredAirlines).each(function(index, entry) {
+                var country = loadedCountriesByCode[entry.countryCode]
+                var row = $("<div class='table-row clickable' onclick=\"showCountryView('" + country.countryCode + "');\"></div>")
+                row.append("<div class='cell'>" + getCountryFlagImg(entry.countryCode) + country.name + "</div>")
+                row.append("<div class='cell'>" + entry.bonus + "</div>")
+                $('#rivalsCanvas .partneredAirlineCountryList').append(row)
+            })
+
+            if (titles.partneredAirlines.length == 0) {
+	    		$('#rivalsCanvas .partneredAirlineCountryList').append($("<div class='table-row'><div class='cell'>-</div><div class='cell'>-</div></div>"))
 	    	}
 	    },
         error: function(jqXHR, textStatus, errorThrown) {
@@ -230,10 +318,10 @@ function updateRivalBaseList(airlineId) {
 	    		var row = $("<div class='table-row'></div>")
 	    		hasBases = true
 	    		if (base.headquarter) {
-	    			row.append("<div class='cell'><img src='assets/images/icons/building-hedge.png' style='vertical-align:middle;'><span>(" + base.scale + ")</span></div><div class='cell'>" + getCountryFlagImg(base.countryCode) + getAirportText(base.city, base.airportName) + "</div>")
+	    			row.append("<div class='cell'><img src='assets/images/icons/building-hedge.png' style='vertical-align:middle;'><span>(" + base.scale + ")</span></div><div class='cell'>" + getCountryFlagImg(base.countryCode) + getAirportText(base.city, base.airportCode) + "</div>")
 	    			$('#rivalBases').prepend(row)
 	    		} else {
-	    			row.append("<div class='cell'><img src='assets/images/icons/building-low.png' style='vertical-align:middle;'><span>(" + base.scale + ")</span></div><div class='cell'>" + getCountryFlagImg(base.countryCode) + getAirportText(base.city, base.airportName) + "</div>")
+	    			row.append("<div class='cell'><img src='assets/images/icons/building-low.png' style='vertical-align:middle;'><span>(" + base.scale + ")</span></div><div class='cell'>" + getCountryFlagImg(base.countryCode) + getAirportText(base.city, base.airportCode) + "</div>")
 	    			$('#rivalBases').append(row)
 	    		}
 	    		

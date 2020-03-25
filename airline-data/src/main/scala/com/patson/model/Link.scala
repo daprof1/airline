@@ -1,7 +1,6 @@
 package com.patson.model
 
-import com.patson.model.airplane.Airplane
-import com.patson.model.airplane.Model
+import com.patson.model.airplane.{Airplane, LinkAssignment, Model}
 import com.patson.model.Scheduling.TimeSlot
 import java.util.concurrent.ConcurrentHashMap
 
@@ -9,25 +8,40 @@ import java.util.concurrent.ConcurrentHashMap
  * 
  * Frequency sum of all assigned plane
  */
-case class Link(from : Airport, to : Airport, airline: Airline, price : LinkClassValues, distance : Int, capacity: LinkClassValues, rawQuality : Int, duration : Int, frequency : Int, flightType : FlightType.Value, var flightNumber : Int = 0, var id : Int = 0) extends IdObject{
+case class Link(from : Airport, to : Airport, airline: Airline, price : LinkClassValues, distance : Int, var capacity: LinkClassValues, rawQuality : Int, duration : Int, var frequency : Int, flightType : FlightType.Value, var flightNumber : Int = 0, var id : Int = 0) extends IdObject{
   @volatile var availableSeats : LinkClassValues = capacity.copy()
   @volatile var soldSeats : LinkClassValues = LinkClassValues.getInstance()
   @volatile var cancelledSeats :  LinkClassValues = LinkClassValues.getInstance()
   @volatile var cancellationCount = 0
   @volatile var majorDelayCount = 0
   @volatile var minorDelayCount = 0
-  @volatile private var assignedAirplanes : List[Airplane] = List.empty
+  @volatile private var assignedAirplanes : Map[Airplane, LinkAssignment] = Map.empty
   @volatile private var assignedModel : Option[Model] = None
   
   @volatile private var hasComputedQuality = false
   @volatile private var computedQualityStore : Int = 0
-  @volatile private var computedQualityPriceAdjust : ConcurrentHashMap[LinkClass, Double] = new ConcurrentHashMap[LinkClass, Double]()
-  
-  def setAssignedAirplanes(assignedAirplanes : List[Airplane]) = {
+
+  var inServiceAirplanes : Map[Airplane, LinkAssignment] = Map.empty
+
+  private val standardPrice : ConcurrentHashMap[LinkClass, Int] = new ConcurrentHashMap[LinkClass, Int]()
+
+  def setAssignedAirplanes(assignedAirplanes : Map[Airplane, LinkAssignment]) = {
     this.assignedAirplanes = assignedAirplanes
     if (!assignedAirplanes.isEmpty) {
-      assignedModel = Some(assignedAirplanes(0).model)
+      assignedModel = Some(assignedAirplanes.toList(0)._1.model)
     }
+    inServiceAirplanes = this.assignedAirplanes.filter(_._1.isReady)
+    recomputeCapacityAndFrequency()
+  }
+
+  /**
+    * for testing only. would not recompute frequency and capacity
+    * @param assignedAirplanes
+    */
+  def setTestingAssignedAirplanes(assignedAirplanes : Map[Airplane, Int]) = {
+    setAssignedAirplanes(assignedAirplanes.toList.map {
+      case (airplane, frequency) => (airplane, LinkAssignment(frequency, Computation.calculateFlightMinutesRequired(airplane.model, distance)))
+    }.toMap)
   }
   
   def getAssignedAirplanes() = {
@@ -64,11 +78,14 @@ case class Link(from : Airport, to : Airport, airline: Airline, price : LinkClas
   
   def computedQuality : Int= {
     if (!hasComputedQuality) {
-      if (assignedAirplanes.isEmpty) {
+
+      if (inServiceAirplanes.isEmpty) {
         0
       } else {
-        
-        computedQualityStore = (rawQuality.toDouble / Link.MAX_QUALITY * 30 + airline.airlineInfo.serviceQuality.toDouble / Airline.MAX_SERVICE_QUALITY * 50 + (assignedAirplanes.foldLeft(0.0)( _ + _.condition.toDouble)) / assignedAirplanes.size / Airplane.MAX_CONDITION * 20).toInt
+        val airplaneConditionQuality = inServiceAirplanes.toList.map {
+          case ((airplane, assignmentPerAirplane)) => airplane.condition / Airplane.MAX_CONDITION * assignmentPerAirplane.frequency
+        }.sum / frequency * 20
+        computedQualityStore = (rawQuality.toDouble / Link.MAX_QUALITY * 30 + airline.airlineInfo.currentServiceQuality / Airline.MAX_SERVICE_QUALITY * 50 + airplaneConditionQuality).toInt
 //        println("computed quality " + computedQualityStore)
         hasComputedQuality = true
         computedQualityStore
@@ -102,7 +119,7 @@ case class Link(from : Airport, to : Airport, airline: Airline, price : LinkClas
   }
   
   def addSoldSeatsByClass(linkClass : LinkClass, soldSeats : Int) = {
-    val soldSeatsClassValues = LinkClassValues(Map(linkClass -> soldSeats)) 
+    val soldSeatsClassValues = LinkClassValues.getInstanceByMap(Map(linkClass -> soldSeats))
     addSoldSeats(soldSeatsClassValues) 
   }
   
@@ -118,8 +135,47 @@ case class Link(from : Airport, to : Airport, airline: Airline, price : LinkClas
       LinkClassValues.getInstance()
     }
   }
+
+  def standardPrice(linkClass : LinkClass) : Int = {
+    var price = standardPrice.get(linkClass)
+    if (price == null.asInstanceOf[Int]) {
+      price = Pricing.computeStandardPrice(distance, flightType, linkClass)
+      standardPrice.put(linkClass, price)
+    }
+    price
+  }
+
+  /**
+    * Recomputes capacity base on assigned airplanes
+    */
+  private def recomputeCapacityAndFrequency() = {
+    var newCapacity = LinkClassValues.getInstance()
+    var newFrequency = 0
+    inServiceAirplanes.foreach {
+      case(airplane, assignment) =>
+        newCapacity = newCapacity + (LinkClassValues(airplane.configuration.economyVal, airplane.configuration.businessVal, airplane.configuration.firstVal) * assignment.frequency)
+        newFrequency += assignment.frequency
+    }
+    capacity = newCapacity
+    frequency = newFrequency
+  }
+
+  def futureCapacity() = {
+    var futureCapacity = LinkClassValues.getInstance()
+    assignedAirplanes.foreach {
+      case(airplane, assignment) => futureCapacity = futureCapacity + (LinkClassValues(airplane.configuration.economyVal, airplane.configuration.businessVal, airplane.configuration.firstVal) * assignment.frequency)
+    }
+    futureCapacity
+  }
+
+  def futureFrequency() = {
+    assignedAirplanes.values.map(_.frequency).sum
+  }
   
-  
+  override def toString() = {
+    s"$id; ${airline.name}; ${from.city}(${from.iata}) => ${to.city}(${to.iata}); distance $distance; freq $frequency; capacity $capacity; price $price"
+  }
+
   lazy val schedule : Seq[TimeSlot] = Scheduling.getLinkSchedule(this)
 }
 
@@ -158,16 +214,16 @@ case class LinkConsideration(link : Link, cost : Double, linkClass : LinkClass, 
     }
 }
 
-sealed abstract class LinkClass(val code : String, val spaceMultiplier : Double, val resourceMultiplier : Double, val priceMultiplier : Double, val level : Int) {
+sealed abstract class LinkClass(val code : String, val spaceMultiplier : Double, val resourceMultiplier : Double, val priceMultiplier : Double, val priceSensitivity : Double, val level : Int) {
   def label : String //level for sorting/comparison purpose
 }
-case object FIRST extends LinkClass("F", spaceMultiplier = 6, resourceMultiplier = 3, priceMultiplier = 9, 3) {
+case object FIRST extends LinkClass("F", spaceMultiplier = 6, resourceMultiplier = 3, priceMultiplier = 9, priceSensitivity = 0.6, level = 3) {
   override def label = "first"
 }
-case object BUSINESS extends LinkClass("J", spaceMultiplier = 2.5, resourceMultiplier = 2, priceMultiplier = 3, 2) {
+case object BUSINESS extends LinkClass("J", spaceMultiplier = 2.5, resourceMultiplier = 2, priceMultiplier = 3, priceSensitivity = 0.8, level = 2) {
   override def label = "business"
 }
-case object ECONOMY extends LinkClass("Y", spaceMultiplier = 1, resourceMultiplier = 1, priceMultiplier = 1, 1) {
+case object ECONOMY extends LinkClass("Y", spaceMultiplier = 1, resourceMultiplier = 1, priceMultiplier = 1, priceSensitivity = 1.0, level =1) {
   override def label = "economy"
 }
 object LinkClass {

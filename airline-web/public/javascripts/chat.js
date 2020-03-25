@@ -1,3 +1,5 @@
+var lastMessageId = 0
+
 function updateChatTabs() {
 	if (activeUser.allianceName) {
 		$("#allianceChatTab").text(activeUser.allianceName)
@@ -102,6 +104,8 @@ RateLimit.prototype = {
     }
 };
 
+var isFromEmoji = false; //yike ugly!
+
 angular.module("ChatApp", []).controller("ChatController", function($scope, $timeout){
    // var ws = new WebSocket("ws://localhost:9000/chat");
    // connect to websockets endpoint of our server
@@ -122,39 +126,45 @@ angular.module("ChatApp", []).controller("ChatController", function($scope, $tim
 		}
 	}
 
-	var wsUri = wsProtocol + "//" +  window.location.hostname + ":" + port + "/chat"; 
-    var ws = new ReconnectingWebSocket(wsUri);
+	var wsUri = wsProtocol + "//" +  window.location.hostname + ":" + port + "/chat";
+    var ws = new ReconnectingWebSocket(function() {
+        return wsUri + "?last-message-id=" + lastMessageId
+    });
 
   // binding model for the UI
   var chat = this;
   chat.gmessages = []; // Global
   chat.amessages = []; // Alliance
-  chat.currentMessage = "";
   chat.username = "";
 
   // what happens when user enters message
-  chat.sendMessage = function() {
-	  limit.tick('myevent_id');
-	  if (activeAirline && (chat.currentMessage.length > 0) && (limit.count('myevent_id') <= 6)) {
-		var active_tab = $("li.tab-link.current").attr('data-tab');
-		var text = { room: active_tab, text: chat.currentMessage, airlineId: activeAirline.id };
-	    //chat.messages.push(text);
-	    chat.currentMessage = "";
-	    // send it to the server through websockets
-	    ws.send(JSON.stringify(text));
-		
-	  } else {
-		  $timeout(function(){ 
-			$scope.chat.gmessages.push("Message Not Sent : Rate Filter or Invalid Message");
-		  });
-		  
-		  $timeout(function(){ 
-			var scroller = document.getElementById("chatBox-1");
-		    scroller.scrollTop = scroller.scrollHeight;
-		  });
-		  
-		  chat.currentMessage = "";
-	  }
+  chat.sendMessage = function(event) {
+      if (isFromEmoji) {
+        isFromEmoji = false;
+        return;
+      }
+      limit.tick('myevent_id');
+      var currentMessage = $('#chattext').val()
+      if (activeAirline && (currentMessage !== "") && (limit.count('myevent_id') <= 20)) {
+        var active_tab = $("li.tab-link.current").attr('data-tab');
+        var text = { room: active_tab, text: currentMessage, airlineId: activeAirline.id };
+        //chat.messages.push(text);
+        $('#chattext').val("");
+        // send it to the server through websockets
+        ws.send(JSON.stringify(text));
+
+      } else {
+          $timeout(function(){
+            $scope.chat.gmessages.push("Message Not Sent : Rate Filter or Invalid Message");
+          });
+
+          $timeout(function(){
+            var scroller = document.getElementById("chatBox-1");
+            scroller.scrollTop = scroller.scrollHeight;
+          });
+
+          $('#chattext').val("");
+      }
   };
 
    ws.onopen = function () {
@@ -181,14 +191,41 @@ angular.module("ChatApp", []).controller("ChatController", function($scope, $tim
    
   // what to do when we receive message from the webserver
   ws.onmessage = function(msg) {
+    if (msg.data == "ping") {
+        console.debug("ping from server")
+        return
+     //ok
+    }
 	var r_text = msg.data;
 	//console.log(r_text);
 	var r_msg = JSON.parse(r_text);
-	
+
+	var date = new Date(r_msg.timestamp)
+	var airlineName = r_msg.airlineName
+	var userLevel = r_msg.userLevels
+	var hourString = date.getHours()
+	var minuteString = date.getMinutes()
+	var secondString = date.getSeconds()
+
+	if (hourString < 10) {
+	    hourString = "0" + hourString
+    }
+    if (minuteString < 10) {
+        minuteString = "0" + minuteString
+    }
+    if (secondString < 10) {
+        secondString = "0" + secondString
+    }
+
+	var dateString = hourString + ":" + minuteString + ":" + secondString
+//	var airlineSpan = $("<span>" + airlineName + "</span>")
+//	var userIcon = getUserLevelImg(userLevel)
+//	airlineSpan.append(userIcon)
+
 	if (!r_msg.allianceRoomId) {
-		chat.gmessages.push(r_msg.text);
+		chat.gmessages.push("[" + dateString + "] " + airlineName + ": " + r_msg.text);
 	} else {
-		chat.amessages.push(r_msg.text);
+		chat.amessages.push("[" + dateString + "] " + airlineName + ": " + r_msg.text);
 	}
     $scope.$digest();
 	
@@ -202,9 +239,13 @@ angular.module("ChatApp", []).controller("ChatController", function($scope, $tim
 		$('.notify-bubble').show(400);
 		$('.notify-bubble').text(parseInt($('.notify-bubble').text())+1);
 	}
+	emojify.run($('.chat-history.current')[0]);             // translate emoji to images
+
+    lastMessageId = r_msg.id
   };
 });
 
 
 
+emojify.setConfig({img_dir : 'assets/images/emoji'});
 

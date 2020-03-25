@@ -8,7 +8,7 @@ $( document ).ready(function() {
 
 function showAllianceCanvas() {
 	setActiveDiv($("#allianceCanvas"))
-	highlightTab($('#allianceCanvasTab'))
+	highlightTab($('.allianceCanvasTab'))
 	loadAllAlliances()
 	if (!activeAirline) {
 		$('#currentAirlineMemberDetails').hide()
@@ -108,7 +108,11 @@ function loadAllAlliances() {
 	    	$.each(alliances, function(index, alliance) {
 	    		loadedAlliancesById[alliance.id] = alliance
 	    		alliance.memberCount = alliance.members.length
-	    		alliance.leaderAirlineName = alliance.leader.name
+			if (alliance.leader) {
+	    			alliance.leaderAirlineName = alliance.leader.name
+			} else {
+				alliance.leaderAirlineName = '-'
+			}
 	    		if (alliance.championPoints) {
 	    			alliance.championPointsValue = alliance.championPoints
 	    		} else {
@@ -153,7 +157,11 @@ function updateAllianceTable(sortProperty, sortOrder) {
 //		}
 		
 		row.append("<div class='cell'>" + alliance.name + "</div>")
-		row.append("<div class='cell'>" + getAirlineLogoImg(alliance.leader.id) + alliance.leader.name + "</div>")
+		if (alliance.leader) {
+			row.append("<div class='cell'>" + getAirlineLogoImg(alliance.leader.id) + alliance.leader.name + "</div>")
+		} else {
+			row.append("<div class='cell'>-</div>")
+		}
 		row.append("<div class='cell' align='right'>" + alliance.members.length + "</div>")
 		if (alliance.championPoints) {
 			row.append("<div class='cell' align='right'>" + alliance.championPoints + "</div>")
@@ -320,7 +328,7 @@ function updateAllianceChampionContries(allianceId) {
 	    	var applicantChampions = championedCountries.applicants
 	    	$(approvedMembersChampions).each(function(index, championDetails) {
 	    		var country = championDetails.country
-	    		var row = $("<div class='table-row clickable' onclick=\"loadCountryDetails('" + country.countryCode + "'); showCountryView();\"></div>")
+	    		var row = $("<div class='table-row clickable' onclick=\"showCountryView('" + country.countryCode + "');\"></div>")
 	    		row.append("<div class='cell'>" + getRankingImg(championDetails.ranking) + "</div>")
 	    		row.append("<div class='cell'>" + getCountryFlagImg(country.countryCode) + country.name + "</div>")
 	    		row.append("<div class='cell'>" + getAirlineLogoImg(championDetails.airlineId) + championDetails.airlineName + "</div>")
@@ -331,7 +339,7 @@ function updateAllianceChampionContries(allianceId) {
 	    	
 	    	$(applicantChampions).each(function(index, championDetails) {
 	    		var country = championDetails.country
-	    		var row = $("<div class='table-row clickable' onclick=\"loadCountryDetails('" + country.countryCode + "'); showCountryView();\"></div>")
+	    		var row = $("<div class='table-row clickable' onclick=\"showCountryView('" + country.countryCode + "');\"></div>")
 	    		row.append("<div class='cell'>" + getRankingImg(championDetails.ranking) + "</div>")
 	    		row.append("<div class='cell'>" + getCountryFlagImg(country.countryCode) + country.name + "</div>")
 	    		row.append("<div class='cell'>" + getAirlineLogoImg(championDetails.airlineId) + championDetails.airlineName + "</div>")
@@ -514,8 +522,8 @@ function drawAllianceLink(link) {
 		     zIndex : 1100,
 		});
 		
-	var fromAirport = getAirportText(link.fromAirportCity, link.fromAirportName)
-	var toAirport = getAirportText(link.toAirportCity, link.toAirportName)
+	var fromAirport = getAirportText(link.fromAirportCity, link.fromAirportCode)
+	var toAirport = getAirportText(link.toAirportCity, link.toAirportCode)
 	
 	
 	shadowPath = new google.maps.Polyline({

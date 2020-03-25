@@ -1,23 +1,7 @@
 package controllers
 
-import com.patson.data.CycleSource
-import com.patson.data.ConsumptionHistorySource
-import com.patson.model.PassengerType
-import com.patson.model.Route
-import com.patson.model.Link
-import com.patson.model.LinkHistory
-import com.patson.model.LinkConsideration
-import com.patson.model.RelatedLink
-import com.patson.data.LinkSource
-import com.patson.model.Airline
-import com.patson.model.LinkConsumptionDetails
-import com.patson.data.AirlineSource
-import java.io.File
-import java.awt.Color
-import play.api.libs.json.Json
-import com.patson.model.LoungeConsumptionDetails
-import com.patson.data.LoungeHistorySource
-import com.patson.model.Airport
+import com.patson.data.{AirlineSource, CycleSource, LinkSource, LoungeHistorySource}
+import com.patson.model._
  
 
 object RankingUtil {
@@ -75,7 +59,7 @@ object RankingUtil {
   }
   
   private[this] def getPassengerRanking(linkConsumptions : Map[Int, List[LinkConsumptionDetails]], airlinesById : Map[Int, Airline]) : List[Ranking] = {
-    val passengersByAirline : Map[Int, Long] = linkConsumptions.mapValues(_.map(_.link.soldSeats.total).sum)
+    val passengersByAirline : Map[Int, Long] = linkConsumptions.view.mapValues(_.map(_.link.soldSeats.total.toLong).sum).toMap
     val sortedPassengersByAirline = passengersByAirline.toList.sortBy(_._2)(Ordering[Long].reverse)  //sort by total passengers of each airline
     
     sortedPassengersByAirline.zipWithIndex.map {
@@ -89,9 +73,10 @@ object RankingUtil {
   
   
   private[this] def getPassengerByZoneRanking(passengersByAirlineAndZone : Map[Int, Map[String, Long]], airlinesById : Map[Int, Airline], rankingType : RankingType.Value, zone : String) : List[Ranking] = {
-    val passengersByAirline : Map[Int, Long] = passengersByAirlineAndZone.mapValues { passengersByZone =>
-      passengersByZone.getOrElse(zone, 0)
-    }
+    val passengersByAirline : Map[Int, Long] = passengersByAirlineAndZone.view.mapValues { passengersByZone =>
+      passengersByZone.getOrElse(zone, 0L)
+    }.toMap
+
     val sortedPassengersByAirline = passengersByAirline.toList.sortBy(_._2)(Ordering[Long].reverse)  //sort by total passengers of each airline
     
     sortedPassengersByAirline.zipWithIndex.map {
@@ -104,9 +89,9 @@ object RankingUtil {
   }
   
   private[this] def getPassengersByZone(linkConsumptions : Map[Int, List[LinkConsumptionDetails]]) : Map[Int, Map[String, Long]] = {
-    val passengersByAirlineAndZone : Map[Int, Map[String, Long]] = linkConsumptions.mapValues(_.groupBy(_.link.from.zone).mapValues{ linkConsumptionsByZone =>
-      linkConsumptionsByZone.map(_.link.soldSeats.total).sum
-    })
+    val passengersByAirlineAndZone : Map[Int, Map[String, Long]] = linkConsumptions.view.mapValues(_.groupBy(_.link.from.zone).view.mapValues { linkConsumptionsByZone =>
+      linkConsumptionsByZone.map(_.link.soldSeats.total.toLong).sum
+    }.toMap).toMap
     
     passengersByAirlineAndZone    
   }
@@ -114,9 +99,9 @@ object RankingUtil {
   
   
   private[this] def getPassengerMileRanking(linkConsumptions : Map[Int, List[LinkConsumptionDetails]], airlinesById : Map[Int, Airline]) : List[Ranking] = {
-    val passengerMileByAirline : Map[Int, Long] = linkConsumptions.mapValues(_.map { linkConsumption => 
+    val passengerMileByAirline : Map[Int, Long] = linkConsumptions.view.mapValues(_.map { linkConsumption =>
         linkConsumption.link.soldSeats.total.toLong * linkConsumption.link.distance
-      }.sum)
+      }.sum).toMap
     
     val sortedPassengerMileByAirline= passengerMileByAirline.toList.sortBy(_._2)(Ordering[Long].reverse)  //sort by total passengers of each airline
     
@@ -153,7 +138,7 @@ object RankingUtil {
       case(details, index) => {
         val lounge = details.lounge
         val ranking = Ranking(RankingType.LOUNGE,
-                key = lounge.airline.id + "|" + lounge.airport.id,
+                key = s"$lounge.airline.id|$lounge.airport.id",
                 entry = lounge,
                 ranking = index + 1,
                 rankedValue = details.selfVisitors + details.allianceVisitors)
@@ -177,19 +162,19 @@ object RankingUtil {
     }
   }
   private[this] def getServiceQualityRanking(airlinesById : Map[Int, Airline]) : List[Ranking] = {
-    val airlinesBySortedServiceQuality = airlinesById.values.toList.sortBy(_.getServiceQuality())(Ordering[Double].reverse)
+    val airlinesBySortedServiceQuality = airlinesById.values.toList.sortBy(_.getCurrentServiceQuality())(Ordering[Double].reverse)
     
     airlinesBySortedServiceQuality.zipWithIndex.map {
       case(airline, index) =>  Ranking(RankingType.SERVICE_QUALITY,
                                                       key = airline.id,
                                                       entry = airline,
                                                       ranking = index + 1,
-                                                      rankedValue = airline.getServiceQuality())
+                                                      rankedValue = airline.getCurrentServiceQuality())
     }
   }
   
   private[this] def getLinkCountRanking(linksByAirline : Map[Int, List[Link]], airlinesById : Map[Int, Airline]) : List[Ranking] = {
-    val linkCountByAirline : Map[Int, Int] = linksByAirline.mapValues(_.length)
+    val linkCountByAirline : Map[Int, Int] = linksByAirline.view.mapValues(_.length).toMap
     val sortedLinkCountByAirline = linkCountByAirline.toList.sortBy(_._2)(Ordering[Int].reverse)  //sort by total passengers of each airline
     
     sortedLinkCountByAirline.zipWithIndex.map {
@@ -222,9 +207,9 @@ object RankingUtil {
   }
   
   private[this] def updateMovements(previousRankings : Map[RankingType.Value, List[Ranking]], newRankings : Map[RankingType.Value, List[Ranking]]) = {
-    val previousRankingsByKey : Map[RankingType.Value, Map[Any, Int]] = previousRankings.mapValues { rankings =>
+    val previousRankingsByKey : Map[RankingType.Value, Map[Any, Int]] = previousRankings.view.mapValues { rankings =>
        rankings.map(ranking => (ranking.key, ranking.ranking)).toMap
-    }
+    }.toMap
     
     
     newRankings.foreach {
